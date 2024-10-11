@@ -8,6 +8,9 @@ import torch
 from pyannote.audio import Pipeline
 import whisper
 
+from tqdm import tqdm
+from pathlib import Path
+
 
 class DiarizedSegment:
 
@@ -45,7 +48,10 @@ def set_torch_device(device: str | None = None) -> None:
         torch.set_default_device("cpu")
 
 
-def parse_speakers(audio_buffer: io.BytesIO, auth_token: str) -> list[dict]:
+def parse_speakers(audio: AudioSegment, auth_token: str) -> list[dict]:
+
+    buffer = io.BytesIO()
+    audio.export(buffer, format="wav")
 
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=auth_token)
     
@@ -54,7 +60,7 @@ def parse_speakers(audio_buffer: io.BytesIO, auth_token: str) -> list[dict]:
         raise Exception()
 
     pipeline.to(torch.device(torch.get_default_device()))
-    diarization = pipeline(audio_buffer)
+    diarization = pipeline(buffer)
 
     timestamps = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
@@ -94,14 +100,12 @@ def join_timestamps(timestamps: list[dict]) -> list[dict]:
     return joined_timestamps[1:]
 
 
-def split_audio_by_timestamp(audio: str | io.BytesIO, timestamps: list[dict]) -> list[DiarizedSegment]:
-
-    audio = AudioSegment.from_file(audio)
+def split_audio_by_timestamp(audio_wav: AudioSegment, timestamps: list[dict]) -> list[DiarizedSegment]:
 
     audio_segments = []
     for timestamp in timestamps:
         audio_segments.append(DiarizedSegment(
-            audio[timestamp["start"]:timestamp["end"]],
+            audio_wav[timestamp["start"]:timestamp["end"]],
             timestamp["speaker"],
             timestamp["start"],
             timestamp["end"]
@@ -110,13 +114,16 @@ def split_audio_by_timestamp(audio: str | io.BytesIO, timestamps: list[dict]) ->
 
 
 def convert_audio_to_array(audio_segment: AudioSegment) -> np.ndarray:
-    buffer = io.BytesIO()
-    audio_segment.export(buffer, format="s16le", codec="pcm_s16le")
-    return np.frombuffer(buffer.getvalue(), np.int16).flatten().astype(np.float32) / 32768.0
+    # buffer = io.BytesIO()
+    # audio_segment.export(buffer, format="s16le", codec="pcm_s16le")
+    # audio_segment.raw_data
+    print(audio_segment.frame_rate)
+    return np.frombuffer(audio_segment.raw_data, np.int16).flatten().astype(np.float32) / 32768.0
 
 
 def transcribe_segment(loaded_model: whisper.Whisper, audio_segment: DiarizedSegment) -> dict:
-    return loaded_model.transcribe(audio_segment.nparray, fp16=False if torch.get_default_device() == "cpu" else True)
+    # audio_segment.nparray
+    return loaded_model.transcribe("temp.wav", fp16=False if torch.get_default_device() == "cpu" else True)
 
 
 def join_transcripts(audio_segments: list[DiarizedSegment]) -> str:
@@ -126,9 +133,9 @@ def join_transcripts(audio_segments: list[DiarizedSegment]) -> str:
     return "\n\n".join(formatted_segments)
 
 
-def save_to_file(output: str, path: str):
-    with open(path, "w") as out:
-        out.write(output)
+def save_to_file(output: str, path: Path):
+    with open(path, "wb") as out:
+        out.write(output.encode("utf-8"))
 
 
 def cli() -> argparse.Namespace:
@@ -144,24 +151,25 @@ def cli() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_auth_file(path: str) -> str:
+def read_auth_file(path: Path) -> str:
     with open(path, "r") as infile:
         return infile.read()
 
 
-def convert_to_wav_buffer(audio_path):
+def convert_to_wav(audio_path: Path) -> AudioSegment:
     
     buffer = io.BytesIO()
-    AudioSegment.from_file(audio_path)[:20000].export(buffer, format="wav")
-    return buffer
+    AudioSegment.from_file(audio_path).export(buffer, format="wav")
+    wav = AudioSegment.from_file(buffer)
+    return wav
 
 
 def main():
 
     args = cli()
-    audio_path = args.audio
+    audio_path = Path(args.audio)
     auth_token = read_auth_file(args.auth_token) if args.auth_file else args.auth_token
-    output_file = args.output_file
+    output_file = Path(args.output_file)
     model_name = args.model
     device = args.torch_device
 
@@ -169,28 +177,44 @@ def main():
 
     print(f"Set processor to {torch.get_default_device()}")
 
-    buffer = convert_to_wav_buffer(audio_path)
+    audio_wav = convert_to_wav(audio_path)
 
-    print("Converted input to .wav")
+    print("Converted input to .wav\nGetting timestamps (this may take a while)")
 
-    timestamps = join_timestamps(parse_speakers(buffer, auth_token))
+    timestamps = join_timestamps(parse_speakers(audio_wav, auth_token))
 
-    print("Got timestamps")
+    audio_segments = split_audio_by_timestamp(audio_wav, timestamps)
 
-    audio_segments = split_audio_by_timestamp(buffer, timestamps)
+    print("Segmented audio")
 
-    print("Created audio segments")
+    for s in audio_segments:
+        s.audio.export(f"{s.speaker}", format="wav")
 
     model = whisper.load_model(model_name)
 
-    print(f"Loaded model {model_name}")
+    print(f"Loaded model {model_name}\n\nTranscribing segments")
 
-    for segment in audio_segments:
-        segment.nparray = convert_audio_to_array(segment.audio)
-        print("Converted audio to array")
-        segment.content = transcribe_segment(model, segment)["text"]
+    with tqdm(total=sum(segment.diff() for segment in audio_segments)) as loop:
+        for segment in audio_segments:
+            segment.audio.export("temp.wav", format="wav")
+            segment.content = transcribe_segment(model, segment)["text"]
+            loop.update(segment.diff())
 
-    print("Joining transcripts")
+    # from whisper.audio import load_audio
+    # for segment in audio_segments:
+    #     segment.audio.export("temp.wav", format="wav")
+    #     # nparr = load_audio("buffer2.wav", sr=96000)
+    #     # segment.nparray = convert_audio_to_array(audio_wav)
+    #     # print(nparr.size)
+    #     # print(nparr)
+    #     # print(segment.nparray.size)
+    #     # print(segment.nparray)
+    #     # exit(0)
+    #     # print("Converted audio to array")
+    #     segment.content = transcribe_segment(model, segment)["text"]
+    
+    temp_audio = Path("temp.wav")
+    temp_audio.unlink()
 
     full_transcript = join_transcripts(audio_segments)
 
@@ -202,6 +226,7 @@ def main():
 if __name__=="__main__":
     with warnings.catch_warnings(action="ignore"):
         main()
+    
 
     '''
     import tqdm
