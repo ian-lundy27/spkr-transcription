@@ -54,7 +54,7 @@ def set_torch_device(device: str | None = None) -> None:
     try:
         torch.set_default_device(device)
     except Exception as e:
-        logging.warning(f"Failed to set processor to {device}, using cpu by default")
+        logging.warning(f"Failed to set device to {device}, using cpu by default")
         torch.set_default_device("cpu")
 
 
@@ -105,10 +105,10 @@ def join_timestamps(timestamps: list[dict[str, str | int]]) -> list[DiarizedSegm
         end = timestamp["end"]
     
     joined_timestamps.append(DiarizedSegment(
-                speaker,
-                start,
-                end
-            ))
+        speaker,
+        start,
+        end
+    ))
 
     return joined_timestamps[1:]
 
@@ -122,9 +122,7 @@ def sync_transcript(timestamps: list[DiarizedSegment], transcription: dict[str, 
     offset = timestamps[0].start
     for s in transcription["segments"]:
         for word in s["words"]:
-            print(f"{word['word']}: {word['start']} - {word['end']}")
             while True:
-                print(timestamps[cur].start,timestamps[cur].end)
                 if ((timestamps[cur].start <= word["start"] * 1000 + offset <= timestamps[cur].end) or
                     (timestamps[cur].start <= word["end"] * 1000 + offset <= timestamps[cur].end)):
                     timestamps[cur].content += word["word"]
