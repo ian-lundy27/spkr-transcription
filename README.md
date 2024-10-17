@@ -35,6 +35,8 @@ Run ```python transcribe.py -h``` for more information
 
 The resulting transcript will save to a file, ```output.txt``` by default.
 
+The script will write chunks of audio to a temporary local file.
+
 ## Is this stupid?
 
 Yes.
