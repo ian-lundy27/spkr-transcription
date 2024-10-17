@@ -60,7 +60,7 @@ def set_torch_device(device: str | None = None) -> None:
 
 def read_auth_file(path: Path) -> str:
     with open(path, "r") as infile:
-        return infile.read()
+        return infile.read().strip()
 
 
 def parse_speakers(audio: AudioSegment, auth_token: str) -> list[dict[str, str | int]]:
