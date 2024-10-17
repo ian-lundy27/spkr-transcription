@@ -12,11 +12,13 @@ import whisper
 
 class DiarizedSegment:
 
-    def __init__(self, 
+    def __init__(self,
+                 audio: AudioSegment,
                  speaker: str,
                  start: int, 
                  end: int,
                  ):
+        self.audio: AudioSegment = audio
         self.speaker: str = speaker
         self.start: int = start
         self.end: int = end
@@ -47,11 +49,6 @@ def set_torch_device(device: str | None = None) -> None:
         device = "cpu"
         if torch.cuda.is_available():
             device = "cuda"
-        # devices unsupported by pyannote
-        # elif torch.backends.mps.is_available():
-        #     device = "mps"
-        # elif torch.xpu.is_available():
-        #     device = "xpu"
     try:
         torch.set_default_device(device)
     except Exception as e:
@@ -88,7 +85,7 @@ def parse_speakers(audio: AudioSegment, auth_token: str) -> list[dict[str, str |
     return timestamps
 
 
-def join_timestamps(timestamps: list[dict[str, str | int]]) -> list[DiarizedSegment]:
+def join_timestamps(timestamps: list[dict[str, str | int]], audio: AudioSegment) -> list[DiarizedSegment]:
     joined_timestamps = []
     speaker = ""
     start = 0
@@ -97,6 +94,7 @@ def join_timestamps(timestamps: list[dict[str, str | int]]) -> list[DiarizedSegm
     for timestamp in timestamps:
         if timestamp["speaker"] != speaker:
             joined_timestamps.append(DiarizedSegment(
+                audio[start:end],
                 speaker,
                 start,
                 end
@@ -106,33 +104,13 @@ def join_timestamps(timestamps: list[dict[str, str | int]]) -> list[DiarizedSegm
         end = timestamp["end"]
     
     joined_timestamps.append(DiarizedSegment(
+        audio[start:end],
         speaker,
         start,
         end
     ))
 
     return joined_timestamps[1:]
-
-
-def transcribe_segment(loaded_model: whisper.Whisper, audio_path: Path, language: str) -> dict[str, str | list]:
-    return loaded_model.transcribe(str(audio_path), word_timestamps=True, language=language, fp16=False if torch.get_default_device() == "cpu" else True)
-
-
-def sync_transcript(timestamps: list[DiarizedSegment], transcription: dict[str, str | list]):
-    cur = 0
-    offset = timestamps[0].start
-    for s in transcription["segments"]:
-        for word in s["words"]:
-            while True:
-                if ((timestamps[cur].start <= word["start"] * 1000 + offset <= timestamps[cur].end) or
-                    (timestamps[cur].start <= word["end"] * 1000 + offset <= timestamps[cur].end)):
-                    timestamps[cur].content += word["word"]
-                    break
-                else:
-                    cur += 1
-                    if cur == len(timestamps):
-                        cur = 0
-                        break
 
 
 def join_transcripts(speaker_segments: list[DiarizedSegment]) -> str:
@@ -151,13 +129,23 @@ def create_timestamp(ms: int, maxtime: int) -> str:
     return stamp
 
 
-def save_to_file(output: str, path: Path):
+def save_to_file(output: str, path: Path) -> None:
     with open(path, "wb") as out:
         out.write(output.encode("utf-8"))
 
 
+def transcribe_segment(segment: DiarizedSegment, model: whisper.Whisper, lang: str) -> None:
+    segment.audio.export("temp")
+    segment.content = model.transcribe("temp", language=lang, fp16=False if torch.get_default_device() == "cpu" else True)
 
-def main():
+
+def transcribe_all_segments(timestamps: list[DiarizedSegment], model: whisper.Whisper, lang: str) -> None:
+    for segment in timestamps:
+        transcribe_segment(segment, model, lang)
+    Path("temp").unlink(True)
+
+
+def main() -> None:
     args = cli()
 
     logging.basicConfig(format="%(message)s",level=args.loglevel)
@@ -176,13 +164,9 @@ def main():
 
     model = whisper.load_model(args.model)
 
-    logging.info(f"Loaded {args.model} whisper model\nTranscribing text (this may take a while)")
+    transcribe_all_segments(timestamps, model, args.language)
 
-    transcription = transcribe_segment(model, Path(args.audio), args.language)
-
-    sync_transcript(timestamps, transcription)
-
-    full_transcript = join_transcripts(timestamps) + "\n\n\n" + transcription["text"]
+    full_transcript = join_transcripts(timestamps)
 
     logging.info("Saving transcript")
 
