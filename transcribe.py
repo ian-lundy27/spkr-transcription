@@ -113,6 +113,12 @@ def join_timestamps(timestamps: list[dict[str, str | int]]) -> list[DiarizedSegm
     return joined_timestamps[1:]
 
 
+def reset_unsupported_devices():
+    device = torch.get_default_device()
+    if device in ("mps", "xpu"):
+        torch.set_default_device("cpu")
+
+
 def transcribe_segment(loaded_model: whisper.Whisper, audio_path: Path, language: str) -> dict[str, str | list]:
     return loaded_model.transcribe(str(audio_path), word_timestamps=True, language=language, fp16=False if torch.get_default_device() == "cpu" else True)
 
@@ -155,6 +161,7 @@ def save_to_file(output: str, path: Path):
         out.write(output.encode("utf-8"))
 
 
+
 def main():
     args = cli()
 
@@ -169,6 +176,8 @@ def main():
     logging.info("Getting timestamps (this may take a while)")
 
     timestamps = join_timestamps(parse_speakers(audio_wav, read_auth_file(args.auth_token) if args.auth_file else args.auth_token))
+
+    reset_unsupported_devices()
 
     model = whisper.load_model(args.model)
 
